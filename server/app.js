@@ -17,43 +17,51 @@ const io = socket(server);
 io.sockets.on("connection", (socket) => {
   console.log("Connected", socket.id);
 
-  socket.on("joinRoom", (roomId) => {
+  socket.on("userConnected", (roomId) => {
+    console.log(socket.id, "joined room", roomId);
+
     if (users[roomId]) {
-      const length = users[roomId].length;
-      if (length === 4) {
-        socket.emit("roomFull");
-        return;
-      }
       users[roomId].push(socket.id);
+
+      socket.join(roomId);
+      socket.emit("roomJoined", roomId);
     } else {
       users[roomId] = [socket.id];
+
+      socket.join(roomId);
+      socket.emit("roomCreated", roomId);
     }
-    socketToRoom[socket.id] = roomId;
-    const usersInThisRoom = users[roomId].filter((id) => id !== socket.id);
-
-    socket.emit("allUsers", usersInThisRoom);
   });
 
-  socket.on("sendingSignal", (payload) => {
-    io.to(payload.userToSignal).emit("userJoined", {
-      signal: payload.signal,
-      callerId: payload.callerId,
-    });
+  socket.on("startCall", (roomId) => {
+    socket.broadcast.to(roomId).emit("startCall");
   });
 
-  socket.on("returningSignal", (payload) => {
-    io.to(payload.callerId).emit("receivingReturnedSignal", {
-      signal: payload.signal,
-      id: socket.id,
-    });
+  socket.on("createOffer", (event) => {
+    socket.broadcast.to(event.roomId).emit("createOffer", event.sdp);
+  });
+
+  socket.on("createAnswer", (event) => {
+    socket.broadcast.to(event.roomId).emit("createAnswer", event.sdp);
+  });
+
+  socket.on("sendIceCandidate", (event) => {
+    socket.broadcast.to(event.roomId).emit("sendIceCandidate", event);
   });
 
   socket.on("disconnect", () => {
+    console.log(socket.id, "disconnected");
     const roomId = socketToRoom[socket.id];
     let room = users[roomId];
     if (room) {
       room = room.filter((id) => id !== socket.id);
       users[roomId] = room;
+
+      for (const user of users[roomId]) {
+        const usersInThisRoom = users[roomId].filter((id) => id !== user);
+
+        io.to(user).emit("usersInRoom", usersInThisRoom);
+      }
     }
   });
 });

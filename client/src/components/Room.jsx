@@ -1,110 +1,155 @@
 import React, { useEffect, useRef, useState } from "react";
 import io from "socket.io-client";
-import Peer from "simple-peer";
-import styled from "styled-components";
 
-const Container = styled.div`
-  padding: 20px;
-  display: flex;
-  height: 100vh;
-  width: 90%;
-  margin: auto;
-  flex-wrap: wrap;
-`;
-
-const StyledVideo = styled.video`
-  height: 40%;
-  width: 50%;
-`;
-
-const Video = (props) => {
-  const ref = useRef();
-
-  useEffect(() => {
-    props.peer.on("stream", (stream) => {
-      ref.current.srcObject = stream;
-    });
-  }, []);
-
-  return <StyledVideo playsInline autoPlay ref={ref} />;
-};
-
-const videoConstraints = {
-  height: window.innerHeight / 2,
-  width: window.innerWidth / 2,
+const iceServers = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
+    { urls: "stun:stun3.l.google.com:19302" },
+  ],
 };
 
 const Room = (props) => {
-  const [peers, setPeers] = useState([]);
-  const socketRef = useRef();
-  const userVideo = useRef();
-  const peersRef = useRef([]);
   const roomId = props.match.params.roomId;
+  const socket = useRef();
+  const rtcPeerConnection = useRef();
+  const [users, setUsers] = useState([]);
+  const localVideo = useRef();
+  const remoteVideo = useRef();
+  const isRoomCreator = useRef(false);
 
-  useEffect(() => {
-    socketRef.current = io.connect("/");
-    navigator.mediaDevices
-      .getUserMedia({ video: videoConstraints, audio: true })
-      .then((stream) => {
-        userVideo.current.srcObject = stream;
-        socketRef.current.emit("joinRoom");
-        socketRef.current.on("allUsers", (users) => {
-          const peers = [];
-          users.forEach((userId) => {
-            const peer = createPeer(userId, socketRef.current.id, stream);
-            peersRef.current.push({ peerId: userId, peer });
+  useEffect(async () => {
+    socket.current = io.connect("ws://localhost:5000", {
+      transports: ["websocket"],
+    });
+    const localStream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true,
+    });
 
-            peers.push(peer);
-          });
+    localVideo.current.srcObject = localStream;
 
-          setPeers(peers);
+    socket.current.emit("userConnected", roomId);
+
+    socket.current.on("roomCreated", async () => {
+      isRoomCreator.current = true;
+    });
+
+    socket.current.on("roomJoined", async () => {
+      socket.current.emit("startCall", roomId);
+    });
+
+    socket.current.on("startCall", async () => {
+      if (isRoomCreator.current) {
+        rtcPeerConnection.current = new RTCPeerConnection(iceServers);
+
+        localStream.getTracks().forEach((track) => {
+          rtcPeerConnection.current.addTrack(track, localStream);
         });
 
-        socketRef.current.on("userJoined", (payload) => {
-          const peer = addPeer(payload.signal, payload.callerId, stream);
+        rtcPeerConnection.current.ontrack = setRemoteStream;
+        rtcPeerConnection.current.onicecandidate = sendIceCandidate;
 
-          peersRef.current.push({ peerId: payload.callerId, peer });
+        let sessionDescription;
+        try {
+          sessionDescription = await rtcPeerConnection.current.createOffer();
+          rtcPeerConnection.current.setLocalDescription(sessionDescription);
+        } catch (error) {
+          console.error(error);
+        }
 
-          setPeers((oldPeers) => [...oldPeers, peer]);
+        socket.current.emit("createOffer", {
+          type: "createOffer",
+          sdp: sessionDescription,
+          roomId,
+        });
+      }
+    });
+
+    socket.current.on("createOffer", async (event) => {
+      if (!isRoomCreator.current) {
+        rtcPeerConnection.current = new RTCPeerConnection(iceServers);
+
+        localStream.getTracks().forEach((track) => {
+          rtcPeerConnection.current.addTrack(track, localStream);
         });
 
-        socketRef.current.on("receivingReturnedSignal", (payload) => {
-          const item = peersRef.current.find((p) => p.peerId === payload.id);
+        rtcPeerConnection.current.ontrack = setRemoteStream;
+        rtcPeerConnection.current.onicecandidate = sendIceCandidate;
+        rtcPeerConnection.current.setRemoteDescription(
+          new RTCSessionDescription(event)
+        );
 
-          item.peer.signal(payload.signal);
+        let sessionDescription;
+        try {
+          sessionDescription = await rtcPeerConnection.current.createAnswer();
+          rtcPeerConnection.current.setLocalDescription(sessionDescription);
+        } catch (error) {
+          console.error(error);
+        }
+
+        socket.current.emit("createAnswer", {
+          type: "createAnswer",
+          sdp: sessionDescription,
+          roomId,
         });
-      });
+      }
+    });
+
+    socket.current.on("createAnswer", (event) => {
+      rtcPeerConnection.current.setRemoteDescription(
+        new RTCSessionDescription(event)
+      );
+    });
+
+    socket.current.on("sendIceCandidate", (event) => {
+      if (rtcPeerConnection.current) {
+        var candidate = new RTCIceCandidate({
+          sdpMLineIndex: event.label,
+          candidate: event.candidate,
+        });
+
+        rtcPeerConnection.current.addIceCandidate(candidate);
+      }
+    });
   }, []);
 
-  function createPeer(userToSignal, callerId, stream) {
-    const peer = new Peer({ initiator: true, trickle: false, stream });
-
-    peer.on("signal", (signal) => {
-      socketRef.current.emit("sendingSignal", {
-        userToSignal,
-        callerId,
-        signal,
-      });
-    });
+  async function callUser() {
+    socket.current.emit("callUser", roomId);
   }
 
-  function addPeer(incomingSignal, callerId, stream) {
-    const peer = new Peer({ initiator: false, trickle: false, stream });
+  function setRemoteStream(event) {
+    remoteVideo.current.srcObject = event.streams[0];
+  }
 
-    peer.on("signal", (signal) => {
-      socketRef.current.emit("returningSignal", { signal, callerId });
-    });
-
-    peer.signal(incomingSignal);
+  function sendIceCandidate(event) {
+    if (event.candidate) {
+      socket.current.emit("sendIceCandidate", {
+        roomId,
+        label: event.candidate.sdpMLineIndex,
+        candidate: event.candidate.candidate,
+      });
+    }
   }
 
   return (
-    <Container>
-      <StyledVideo muted ref={userVideo} autoPlay playsInline />
-      {peers.map((peer, index) => {
-        return <Video key={index} peer={peer} />;
-      })}
-    </Container>
+    <div>
+      <ul>
+        {users.map((u) => (
+          <li key={u} onClick={() => callUser(u)}>
+            {u}
+          </li>
+        ))}
+      </ul>
+      <video
+        style={{ border: "1px solid red" }}
+        ref={localVideo}
+        muted
+        autoPlay
+      />
+      <video style={{ border: "1px solid green" }} ref={remoteVideo} autoPlay />
+    </div>
   );
 };
 
