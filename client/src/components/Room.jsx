@@ -20,7 +20,7 @@ const Room = (props) => {
   const isRoomCreator = useRef(false);
 
   useEffect(async () => {
-    socket.current = io.connect("ws://localhost:5000", {
+    socket.current = io.connect("wss://ehub.rabbitsoftware.dev", {
       transports: ["websocket"],
     });
     const localStream = await navigator.mediaDevices.getUserMedia({
